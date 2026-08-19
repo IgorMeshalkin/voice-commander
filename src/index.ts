@@ -76,9 +76,15 @@ async function main(): Promise<void> {
 
   const keycodes = findShortcutKeycodes();
   let indicator: ChildProcess | null = null;
-  const speech = new SpeechPipeline((state) => {
-    indicator?.stdin?.write(state === "idle" ? "hide\n" : `status:${state}\n`);
-  });
+  const speech = new SpeechPipeline(
+    (state) => {
+      indicator?.stdin?.write(state === "idle" ? "hide\n" : `status:${state}\n`);
+    },
+    (text) => {
+      const encodedText = Buffer.from(text, "utf8").toString("base64");
+      indicator?.stdin?.write(`copy:${encodedText}\n`);
+    },
+  );
   await speech.start();
   const keyboard = spawn("xinput", ["test-xi2", "--root"], {
     stdio: ["ignore", "pipe", "inherit"],

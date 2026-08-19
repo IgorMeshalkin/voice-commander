@@ -22,7 +22,7 @@ interface RecognitionResult {
   text: string;
 }
 
-export type ProcessingState = "idle" | "recognizing" | "inserting";
+export type ProcessingState = "idle" | "recognizing" | "copied";
 
 export class SpeechPipeline {
   private readonly projectRoot = join(__dirname, "..");
@@ -50,11 +50,15 @@ export class SpeechPipeline {
   private sequenceNumber = 0;
   private nextSequenceToInsert = 0;
   private readonly recognitionResults = new Map<number, RecognitionResult>();
+  private readonly recognizedTexts: string[] = [];
   private pendingRecognitions = 0;
-  private pendingInsertions = 0;
   private pendingRecorderStops = 0;
+  private sessionResultDelivered = true;
 
-  constructor(private readonly onProcessingChange: (state: ProcessingState) => void) {}
+  constructor(
+    private readonly onProcessingChange: (state: ProcessingState) => void,
+    private readonly onTextReady: (text: string) => void,
+  ) {}
 
   async start(): Promise<void> {
     this.server = spawn(
@@ -107,6 +111,8 @@ export class SpeechPipeline {
 
     this.sessionNumber += 1;
     this.recognitionResults.clear();
+    this.recognizedTexts.length = 0;
+    this.sessionResultDelivered = false;
     this.nextSequenceToInsert = this.sequenceNumber;
     this.audioBuffer = Buffer.alloc(0);
     const session = this.sessionNumber;
@@ -209,7 +215,9 @@ export class SpeechPipeline {
       this.recognitionResults.delete(this.nextSequenceToInsert);
       this.nextSequenceToInsert += 1;
 
-      if (result?.text) this.insertText(result.text, result.session);
+      if (result?.text && result.session === this.sessionNumber) {
+        this.recognizedTexts.push(result.text);
+      }
     }
   }
 
@@ -236,41 +244,26 @@ export class SpeechPipeline {
       .trim();
   }
 
-  private insertText(text: string, session: number): void {
-    if (session !== this.sessionNumber) return;
-
-    const value = `${text} `;
-    console.log(`Распознано: ${text}`);
-
-    const typer = spawn("xdotool", ["type", "--clearmodifiers", "--delay", "0", "--", value], {
-      stdio: "inherit",
-    });
-    this.pendingInsertions += 1;
-    let insertionFinished = false;
-    const finishInsertion = (): void => {
-      if (insertionFinished) return;
-      insertionFinished = true;
-      this.pendingInsertions -= 1;
-      this.notifyProcessingState();
-    };
-    typer.once("error", (error) => {
-      console.error("Не удалось вставить распознанный текст:", error.message);
-      finishInsertion();
-    });
-    typer.once("exit", finishInsertion);
-  }
-
   private notifyProcessingState(): void {
-    if (this.recorder) return;
+    if (this.recorder && !this.recorderIsStopping) return;
     if (this.pendingRecorderStops > 0 || this.pendingRecognitions > 0) {
       this.onProcessingChange("recognizing");
       return;
     }
-    if (this.pendingInsertions > 0) {
-      this.onProcessingChange("inserting");
+    if (!this.sessionResultDelivered) {
+      this.sessionResultDelivered = true;
+      const text = this.recognizedTexts.join(" ").replace(/\s+/g, " ").trim();
+      if (text) {
+        console.log(`Распознано: ${text}`);
+        this.onTextReady(text);
+        this.onProcessingChange("copied");
+        return;
+      }
+    }
+    if (this.sessionResultDelivered) {
+      this.onProcessingChange("idle");
       return;
     }
-    this.onProcessingChange("idle");
   }
 
   private hasAudibleSpeech(pcm: Buffer): boolean {

@@ -42,6 +42,8 @@ statusLabel.set_xalign(1);
 statusLabel.set_markup('<span foreground="white" weight="bold" size="large"></span>');
 let indicatorColor = [0.92, 0.05, 0.08];
 let pointerIsOverIndicator = false;
+let successIsVisible = false;
+let successHideTimer = 0;
 drawingArea.connect("draw", (_widget, context) => {
   context.setOperator(imports.cairo.Operator.CLEAR);
   context.paint();
@@ -55,7 +57,16 @@ drawingArea.connect("draw", (_widget, context) => {
   context.setSourceRGBA(indicatorColor[0], indicatorColor[1], indicatorColor[2], 1);
   context.fill();
 
-  if (pointerIsOverIndicator) {
+  if (successIsVisible) {
+    context.setSourceRGBA(1, 1, 1, 1);
+    context.setLineWidth(4);
+    context.setLineCap(imports.cairo.LineCap.ROUND);
+    context.setLineJoin(imports.cairo.LineJoin.ROUND);
+    context.moveTo(22, 33);
+    context.lineTo(29, 40);
+    context.lineTo(43, 24);
+    context.stroke();
+  } else if (pointerIsOverIndicator) {
     context.setSourceRGBA(1, 1, 1, 1);
     context.setLineWidth(4);
     context.setLineCap(imports.cairo.LineCap.ROUND);
@@ -116,12 +127,18 @@ input.set_flags(input.get_flags() | GLib.IOFlags.NONBLOCK);
 
 function handleCommand(command) {
   if (command === "recording") {
+    if (successHideTimer) GLib.source_remove(successHideTimer);
+    successHideTimer = 0;
+    successIsVisible = false;
     indicatorColor = [0.92, 0.05, 0.08];
     statusLabel.set_markup('<span foreground="white" weight="bold" size="large"></span>');
     drawingArea.queue_draw();
     window.show_all();
   }
   if (command === "processing") {
+    if (successHideTimer) GLib.source_remove(successHideTimer);
+    successHideTimer = 0;
+    successIsVisible = false;
     indicatorColor = [1, 0.72, 0.02];
     statusLabel.set_markup(
       '<span foreground="white" weight="bold" size="large">Распознаю</span>',
@@ -130,18 +147,40 @@ function handleCommand(command) {
     window.show_all();
   }
   if (command === "status:recognizing") {
+    if (successHideTimer) GLib.source_remove(successHideTimer);
+    successHideTimer = 0;
+    successIsVisible = false;
+    indicatorColor = [1, 0.72, 0.02];
     statusLabel.set_markup(
       '<span foreground="white" weight="bold" size="large">Распознаю</span>',
     );
+    drawingArea.queue_draw();
     window.show_all();
   }
-  if (command === "status:inserting") {
+  if (command === "status:copied") {
+    indicatorColor = [0.12, 0.72, 0.28];
+    successIsVisible = true;
     statusLabel.set_markup(
-      '<span foreground="white" weight="bold" size="large">Вставляю текст</span>',
+      '<span foreground="white" weight="bold" size="large">Ctrl+V</span>',
     );
+    drawingArea.queue_draw();
     window.show_all();
+    if (successHideTimer) GLib.source_remove(successHideTimer);
+    successHideTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 3000, () => {
+      successHideTimer = 0;
+      successIsVisible = false;
+      window.hide();
+      return GLib.SOURCE_REMOVE;
+    });
   }
   if (command === "hide") window.hide();
+  if (command.startsWith("copy:")) {
+    const encodedText = command.slice("copy:".length);
+    const text = ByteArray.toString(GLib.base64_decode(encodedText));
+    const clipboard = Gtk.Clipboard.get(Gdk.Atom.intern("CLIPBOARD", false));
+    clipboard.set_text(text, -1);
+    clipboard.store();
+  }
   if (command.startsWith("submit:")) {
     const encodedText = command.slice("submit:".length);
     const text = ByteArray.toString(GLib.base64_decode(encodedText));
