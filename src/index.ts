@@ -1,8 +1,12 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
+import { AudioRecorder } from "./audio-recorder.js";
+import { ApiServer } from "./api-server.js";
+import { DatabaseService } from "./database.js";
 import { SpeechPipeline } from "./speech.js";
 
 const VOICE_HOLD_DELAY_MS = 1_000;
+const AUDIO_RECORD_HOLD_DELAY_MS = 1_000;
 
 const PHRASE_SHORTCUTS = [
   { symbol: "y", keycode: 29, label: "Y/Н", text: "Да" },
@@ -14,6 +18,7 @@ const PHRASE_SHORTCUTS = [
 interface ShortcutKeycodes {
   control: Set<number>;
   space: number;
+  record: number;
   phrases: Map<number, string>;
 }
 
@@ -26,6 +31,7 @@ function findShortcutKeycodes(): ShortcutKeycodes {
 
   const control = new Set<number>();
   let space: number | null = null;
+  let record: number | null = null;
 
   for (const line of result.stdout.split("\n")) {
     const keycode = Number(line.match(/^\s*(\d+)/)?.[1]);
@@ -33,16 +39,17 @@ function findShortcutKeycodes(): ShortcutKeycodes {
 
     if (/\bControl_[LR]\b/.test(line)) control.add(keycode);
     if (/\bspace\b/.test(line)) space = keycode;
+    if (/\bs\b/.test(line)) record = keycode;
   }
 
-  if (control.size === 0 || space === null) {
-    throw new Error("Не удалось найти Ctrl или Space в текущей X11-раскладке");
+  if (control.size === 0 || space === null || record === null) {
+    throw new Error("Не удалось найти Ctrl, Space или S в текущей X11-раскладке");
   }
 
   const phrases = new Map<number, string>(
     PHRASE_SHORTCUTS.map(({ keycode, text }) => [keycode, text]),
   );
-  return { control, space, phrases };
+  return { control, space, record, phrases };
 }
 
 function startIndicator(onEmergencyStop: () => void): ChildProcess {
@@ -76,6 +83,9 @@ async function main(): Promise<void> {
 
   const keycodes = findShortcutKeycodes();
   let indicator: ChildProcess | null = null;
+  const database = new DatabaseService();
+  await database.initialize();
+  const apiServer = new ApiServer(database);
   const speech = new SpeechPipeline(
     (state) => {
       indicator?.stdin?.write(state === "idle" ? "hide\n" : `status:${state}\n`);
@@ -85,7 +95,20 @@ async function main(): Promise<void> {
       indicator?.stdin?.write(`copy:${encodedText}\n`);
     },
   );
+  const audioRecorder = new AudioRecorder(
+    (state) => {
+      if (state.type === "recording") {
+        indicator?.stdin?.write(`audio-recording:${state.elapsedSeconds}\n`);
+      } else if (state.type === "saving") {
+        indicator?.stdin?.write("audio-saving\n");
+      } else {
+        indicator?.stdin?.write("hide\n");
+      }
+    },
+    (file) => database.saveAudioFile(file),
+  );
   await speech.start();
+  await apiServer.start();
   const keyboard = spawn("xinput", ["test-xi2", "--root"], {
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -93,6 +116,9 @@ async function main(): Promise<void> {
     console.error("Аварийное завершение по кнопке индикатора");
     keyboard.kill();
     speech.shutdown();
+    audioRecorder.shutdown();
+    apiServer.close();
+    void database.close();
     indicator?.kill();
     process.exit(0);
   });
@@ -100,6 +126,7 @@ async function main(): Promise<void> {
   let currentEvent: "press" | "release" | null = null;
   let bufferedOutput = "";
   let holdTimer: NodeJS.Timeout | null = null;
+  let audioHoldTimer: NodeJS.Timeout | null = null;
   const pressedKeys = new Set<number>();
   let listeningIsActive = false;
 
@@ -122,20 +149,58 @@ async function main(): Promise<void> {
   const activationKeysAreDown = (): boolean =>
     controlIsDown() && pressedKeys.has(keycodes.space);
 
+  const audioActivationKeysAreDown = (): boolean =>
+    activationKeysAreDown() && pressedKeys.has(keycodes.record);
+
+  const cancelVoiceHold = (): void => {
+    if (!holdTimer) return;
+    clearTimeout(holdTimer);
+    holdTimer = null;
+  };
+
   const cancelActivation = (): void => {
-    if (holdTimer) {
-      clearTimeout(holdTimer);
-      holdTimer = null;
-    }
+    cancelVoiceHold();
     setListening(false);
   };
 
   const beginActivation = (): void => {
-    if (holdTimer || listeningIsActive || !activationKeysAreDown()) return;
+    if (
+      holdTimer ||
+      listeningIsActive ||
+      audioRecorder.isBusy ||
+      !activationKeysAreDown() ||
+      pressedKeys.has(keycodes.record)
+    ) return;
     holdTimer = setTimeout(() => {
       holdTimer = null;
       if (activationKeysAreDown()) setListening(true);
     }, VOICE_HOLD_DELAY_MS);
+  };
+
+  const cancelAudioActivation = (): void => {
+    if (!audioHoldTimer) return;
+    clearTimeout(audioHoldTimer);
+    audioHoldTimer = null;
+  };
+
+  const beginAudioActivation = (): void => {
+    if (audioHoldTimer || listeningIsActive || audioRecorder.isBusy || !audioActivationKeysAreDown()) {
+      return;
+    }
+    cancelVoiceHold();
+    audioHoldTimer = setTimeout(() => {
+      audioHoldTimer = null;
+      if (!audioActivationKeysAreDown()) return;
+      try {
+        audioRecorder.start();
+      } catch (error: unknown) {
+        console.error(
+          "Не удалось начать запись звука:",
+          error instanceof Error ? error.message : error,
+        );
+        indicator?.stdin?.write("hide\n");
+      }
+    }, AUDIO_RECORD_HOLD_DELAY_MS);
   };
 
   const submitPhrase = (text: string): void => {
@@ -147,14 +212,22 @@ async function main(): Promise<void> {
     if (pressedKeys.has(keycode)) return;
     pressedKeys.add(keycode);
 
+    if (audioRecorder.isRecording && activationKeysAreDown()) {
+      audioRecorder.stop();
+      return;
+    }
+
     const phrase = keycodes.phrases.get(keycode);
     if (phrase && controlIsDown()) submitPhrase(phrase);
-    beginActivation();
+    if (audioActivationKeysAreDown()) beginAudioActivation();
+    else beginActivation();
   };
 
   const handleRelease = (keycode: number): void => {
     pressedKeys.delete(keycode);
-    if (!activationKeysAreDown()) cancelActivation();
+    if (!activationKeysAreDown() && listeningIsActive) cancelActivation();
+    else if (!activationKeysAreDown()) cancelVoiceHold();
+    if (!audioActivationKeysAreDown()) cancelAudioActivation();
   };
 
   keyboard.stdout.setEncoding("utf8");
@@ -181,6 +254,9 @@ async function main(): Promise<void> {
     indicator?.stdin?.end();
     indicator?.kill();
     speech.shutdown();
+    audioRecorder.shutdown();
+    apiServer.close();
+    void database.close();
     process.exit(exitCode);
   };
 
@@ -192,7 +268,7 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `Ctrl+Space (${VOICE_HOLD_DELAY_MS} мс) — прослушивание; команды: ${PHRASE_SHORTCUTS.map(({ label, text }) => `Ctrl+${label} — «${text}»`).join("; ")}. Для выхода нажмите Ctrl+C.`,
+    `Ctrl+Space (${VOICE_HOLD_DELAY_MS} мс) — распознавание; Ctrl+Space+S (${AUDIO_RECORD_HOLD_DELAY_MS} мс) — запись Input+Output, однократный Ctrl+Space — остановка записи; команды: ${PHRASE_SHORTCUTS.map(({ label, text }) => `Ctrl+${label} — «${text}»`).join("; ")}. Для выхода нажмите Ctrl+C.`,
   );
 }
 

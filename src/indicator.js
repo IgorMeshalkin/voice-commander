@@ -135,6 +135,36 @@ function handleCommand(command) {
     drawingArea.queue_draw();
     window.show_all();
   }
+  if (command.startsWith("audio-recording:")) {
+    if (successHideTimer) GLib.source_remove(successHideTimer);
+    successHideTimer = 0;
+    successIsVisible = false;
+    indicatorColor = [0.92, 0.05, 0.08];
+    const totalSeconds = Number(command.slice("audio-recording:".length));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const paddedSeconds = String(seconds).padStart(2, "0");
+    const elapsed = hours > 0
+      ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${paddedSeconds}`
+      : minutes > 0
+        ? `${String(minutes).padStart(2, "0")}:${paddedSeconds}`
+        : paddedSeconds;
+    statusLabel.set_markup(
+      `<span foreground="white" weight="bold" size="large">${elapsed}</span>`,
+    );
+    drawingArea.queue_draw();
+    window.show_all();
+  }
+  if (command === "audio-saving") {
+    successIsVisible = false;
+    indicatorColor = [1, 0.72, 0.02];
+    statusLabel.set_markup(
+      '<span foreground="white" weight="bold" size="large">Сохраняю</span>',
+    );
+    drawingArea.queue_draw();
+    window.show_all();
+  }
   if (command === "processing") {
     if (successHideTimer) GLib.source_remove(successHideTimer);
     successHideTimer = 0;

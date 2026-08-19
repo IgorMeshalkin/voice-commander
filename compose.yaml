@@ -1,4 +1,19 @@
 services:
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: voice_commander
+      POSTGRES_USER: voice_commander
+      POSTGRES_PASSWORD: voice_commander
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voice_commander -d voice_commander"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   voice-commander:
     build:
       context: .
@@ -11,7 +26,17 @@ services:
       XAUTHORITY: /run/host-xauthority
       XDG_SESSION_TYPE: x11
       PULSE_SERVER: unix:/run/user/1000/pulse/native
+      DATABASE_URL: postgresql://voice_commander:voice_commander@postgres:5432/voice_commander
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18081:18081"
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:ro
       - ${XAUTHORITY:-/run/user/1000/gdm/Xauthority}:/run/host-xauthority:ro
       - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse/native:/run/user/1000/pulse/native
+      - ${HOME}/voice-controller/audio:/recordings
+
+volumes:
+  postgres-data:
