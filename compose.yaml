@@ -11,6 +11,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    ports:
+      - "127.0.0.1:15432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
@@ -46,6 +48,7 @@ services:
     environment:
       VOICE_RECORDINGS_DIR: /recordings
       VOICE_TRANSCRIPTIONS_DIR: /transcriptions
+      REVIEW_HOOK_SOCKET: /transcriptions/.review-worker.sock
       WHISPER_MODEL_PATH: /app/vendor/whisper.cpp/models/ggml-small-q5_1.bin
       DATABASE_URL: postgresql://voice_commander:voice_commander@postgres:5432/voice_commander
     depends_on:

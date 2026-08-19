@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc && cp src/indicator.js dist/indicator.js",
     "start": "node dist/index.js",
+    "start:review-worker": "node dist/review-worker.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit"
   },

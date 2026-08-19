@@ -1,0 +1,18 @@
+[Unit]
+Description=Voice Commander audio transcription review worker
+After=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/igormeshalkin/WebstormProjects/voice-commander
+Environment=DATABASE_URL=postgresql://voice_commander:voice_commander@127.0.0.1:15432/voice_commander
+Environment=VOICE_TRANSCRIPTIONS_DIR=/home/igormeshalkin/voice-commander/transctibtions
+Environment=CODEX_BIN=/home/igormeshalkin/.npm-global/bin/codex
+Environment=REVIEW_HOOK_SOCKET=/home/igormeshalkin/voice-commander/transctibtions/.review-worker.sock
+ExecStart=/usr/bin/node /home/igormeshalkin/WebstormProjects/voice-commander/dist/review-worker.js
+Restart=on-failure
+RestartSec=10
+Nice=15
+
+[Install]
+WantedBy=default.target

@@ -1,5 +1,6 @@
 import { access, readdir, rename, unlink } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
+import { request } from "node:http";
 import { basename, extname, join } from "node:path";
 import { DatabaseService } from "./database.js";
 
@@ -11,6 +12,8 @@ const WHISPER_MODEL_PATH =
   process.env.WHISPER_MODEL_PATH ??
   "/app/vendor/whisper.cpp/models/ggml-small-q5_1.bin";
 const SCAN_INTERVAL_MS = 10_000;
+const REVIEW_HOOK_SOCKET =
+  process.env.REVIEW_HOOK_SOCKET ?? join(TRANSCRIPTIONS_DIR, ".review-worker.sock");
 
 let running = true;
 let recognitionProcess: ChildProcess | null = null;
@@ -25,12 +28,52 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+async function triggerReview(id: string, filename: string): Promise<void> {
+  const payload = JSON.stringify({ id, filename });
+  await new Promise<void>((resolve, reject) => {
+    const hookRequest = request(
+      {
+        socketPath: REVIEW_HOOK_SOCKET,
+        path: "/review",
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+        timeout: 5_000,
+      },
+      (response) => {
+        response.resume();
+        if (response.statusCode === 202) resolve();
+        else reject(new Error(`review hook вернул HTTP ${response.statusCode ?? "unknown"}`));
+      },
+    );
+    hookRequest.once("timeout", () => hookRequest.destroy(new Error("review hook timeout")));
+    hookRequest.once("error", reject);
+    hookRequest.end(payload);
+  });
+}
+
+async function markTranscribedAndTriggerReview(
+  database: DatabaseService,
+  filename: string,
+): Promise<void> {
+  const id = await database.markAudioFileTranscribed(filename);
+  if (!id) return;
+  try {
+    await triggerReview(id, filename);
+  } catch (error) {
+    await database.rollbackAudioFileTranscribed(id);
+    throw error;
+  }
+}
+
 async function transcribe(filename: string, database: DatabaseService): Promise<void> {
   const stem = basename(filename, extname(filename));
   const audioPath = join(AUDIO_DIR, filename);
   const finalOutputPath = join(TRANSCRIPTIONS_DIR, `${stem}.txt`);
   if (await exists(finalOutputPath)) {
-    await database.markAudioFileTranscribed(filename);
+    await markTranscribedAndTriggerReview(database, filename);
     return;
   }
 
@@ -84,7 +127,7 @@ async function transcribe(filename: string, database: DatabaseService): Promise<
   }
 
   await rename(temporaryOutputPath, finalOutputPath);
-  await database.markAudioFileTranscribed(filename);
+  await markTranscribedAndTriggerReview(database, filename);
   console.log(`Транскрипция сохранена: ${finalOutputPath}`);
 }
 
