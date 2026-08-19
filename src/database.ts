@@ -9,6 +9,7 @@ export interface AudioFileEntity {
 
 export interface StoredAudioFile extends AudioFileEntity {
   id: string;
+  isTranscribed: boolean;
 }
 
 export interface AudioFilePage {
@@ -30,8 +31,13 @@ export class DatabaseService {
         filename TEXT NOT NULL UNIQUE,
         saved_at TIMESTAMPTZ NOT NULL,
         duration_ms BIGINT NOT NULL CHECK (duration_ms >= 0),
-        size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0)
+        size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+        is_transcribed BOOLEAN NOT NULL DEFAULT FALSE
       )
+    `);
+    await this.pool.query(`
+      ALTER TABLE audio_files
+      ADD COLUMN IF NOT EXISTS is_transcribed BOOLEAN NOT NULL DEFAULT FALSE
     `);
     await this.pool.query(`
       DO $$
@@ -75,6 +81,13 @@ export class DatabaseService {
     );
   }
 
+  async markAudioFileTranscribed(filename: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE audio_files SET is_transcribed = TRUE WHERE filename = $1",
+      [filename],
+    );
+  }
+
   async listAudioFiles(
     page: number,
     pageSize: number,
@@ -89,9 +102,10 @@ export class DatabaseService {
         saved_at: Date;
         duration_ms: string;
         size_bytes: string;
+        is_transcribed: boolean;
       }>(
         `
-          SELECT id, filename, saved_at, duration_ms, size_bytes
+          SELECT id, filename, saved_at, duration_ms, size_bytes, is_transcribed
           FROM audio_files
           ORDER BY saved_at ${direction}, id ${direction}
           LIMIT $1 OFFSET $2
@@ -108,6 +122,7 @@ export class DatabaseService {
         savedAt: row.saved_at,
         durationMs: Number(row.duration_ms),
         sizeBytes: Number(row.size_bytes),
+        isTranscribed: row.is_transcribed,
       })),
       totalItems: Number(countResult.rows[0]?.count ?? 0),
     };

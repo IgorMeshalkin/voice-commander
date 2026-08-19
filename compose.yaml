@@ -36,7 +36,26 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:ro
       - ${XAUTHORITY:-/run/user/1000/gdm/Xauthority}:/run/host-xauthority:ro
       - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse/native:/run/user/1000/pulse/native
-      - ${HOME}/voice-controller/audio:/recordings
+      - ${HOME}/voice-commander/audio:/recordings
+
+  transcription-worker:
+    image: voice-commander:local
+    restart: unless-stopped
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    entrypoint: ["node", "/app/dist/transcription-worker.js"]
+    environment:
+      VOICE_RECORDINGS_DIR: /recordings
+      VOICE_TRANSCRIPTIONS_DIR: /transcriptions
+      WHISPER_MODEL_PATH: /app/vendor/whisper.cpp/models/ggml-small-q5_1.bin
+      DATABASE_URL: postgresql://voice_commander:voice_commander@postgres:5432/voice_commander
+    depends_on:
+      voice-commander:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ${HOME}/voice-commander/audio:/recordings:ro
+      - ${HOME}/voice-commander/transctibtions:/transcriptions
 
 volumes:
   postgres-data:
