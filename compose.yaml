@@ -1,0 +1,17 @@
+services:
+  voice-commander:
+    build:
+      context: .
+    image: voice-commander:local
+    container_name: voice-commander
+    restart: "no"
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      DISPLAY: ${DISPLAY:-:1}
+      XAUTHORITY: /run/host-xauthority
+      XDG_SESSION_TYPE: x11
+      PULSE_SERVER: unix:/run/user/1000/pulse/native
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - ${XAUTHORITY:-/run/user/1000/gdm/Xauthority}:/run/host-xauthority:ro
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse/native:/run/user/1000/pulse/native

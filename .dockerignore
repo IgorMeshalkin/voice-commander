@@ -1,0 +1,16 @@
+.git
+.idea
+dist
+node_modules
+*.log
+
+vendor/whisper.cpp/*
+!vendor/whisper.cpp/build/
+!vendor/whisper.cpp/models/
+vendor/whisper.cpp/build/*
+!vendor/whisper.cpp/build/bin/
+vendor/whisper.cpp/build/bin/*
+!vendor/whisper.cpp/build/bin/whisper-server
+!vendor/whisper.cpp/build/bin/lib*.so*
+vendor/whisper.cpp/models/*
+!vendor/whisper.cpp/models/ggml-small-q5_1.bin

@@ -1,12 +1,20 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
+import { SpeechPipeline } from "./speech.js";
 
-const HOLD_DELAY_MS = 1_000;
+const VOICE_HOLD_DELAY_MS = 1_000;
+
+const PHRASE_SHORTCUTS = [
+  { symbol: "y", keycode: 29, label: "Y/Н", text: "Да" },
+  { symbol: "u", keycode: 30, label: "U/Г", text: "Нет" },
+  { symbol: "i", keycode: 31, label: "I/Ш", text: "Согласовано, делай" },
+  { symbol: "h", keycode: 43, label: "H/Р", text: "Готово" },
+] as const;
 
 interface ShortcutKeycodes {
   control: Set<number>;
   space: number;
-  yes: number;
+  phrases: Map<number, string>;
 }
 
 function findShortcutKeycodes(): ShortcutKeycodes {
@@ -18,7 +26,6 @@ function findShortcutKeycodes(): ShortcutKeycodes {
 
   const control = new Set<number>();
   let space: number | null = null;
-  let yes: number | null = null;
 
   for (const line of result.stdout.split("\n")) {
     const keycode = Number(line.match(/^\s*(\d+)/)?.[1]);
@@ -26,20 +33,31 @@ function findShortcutKeycodes(): ShortcutKeycodes {
 
     if (/\bControl_[LR]\b/.test(line)) control.add(keycode);
     if (/\bspace\b/.test(line)) space = keycode;
-    if (/\by\b/.test(line)) yes = keycode;
   }
 
-  if (control.size === 0 || space === null || yes === null) {
-    throw new Error("Не удалось найти Ctrl, Space или Y/Н в текущей X11-раскладке");
+  if (control.size === 0 || space === null) {
+    throw new Error("Не удалось найти Ctrl или Space в текущей X11-раскладке");
   }
 
-  return { control, space, yes };
+  const phrases = new Map<number, string>(
+    PHRASE_SHORTCUTS.map(({ keycode, text }) => [keycode, text]),
+  );
+  return { control, space, phrases };
 }
 
-function startIndicator(): ChildProcess {
+function startIndicator(onEmergencyStop: () => void): ChildProcess {
   const scriptPath = join(__dirname, "indicator.js");
   const process = spawn("gjs", [scriptPath], {
-    stdio: ["pipe", "inherit", "inherit"],
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+
+  let bufferedOutput = "";
+  process.stdout?.setEncoding("utf8");
+  process.stdout?.on("data", (chunk: string) => {
+    bufferedOutput += chunk;
+    const lines = bufferedOutput.split("\n");
+    bufferedOutput = lines.pop() ?? "";
+    if (lines.some((line) => line.trim() === "emergency")) onEmergencyStop();
   });
 
   process.on("exit", (code) => {
@@ -51,15 +69,26 @@ function startIndicator(): ChildProcess {
   return process;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   if (process.env.XDG_SESSION_TYPE !== "x11") {
     throw new Error("Текущая версия прототипа поддерживает только X11");
   }
 
   const keycodes = findShortcutKeycodes();
-  const indicator = startIndicator();
+  let indicator: ChildProcess | null = null;
+  const speech = new SpeechPipeline((state) => {
+    indicator?.stdin?.write(state === "idle" ? "hide\n" : `status:${state}\n`);
+  });
+  await speech.start();
   const keyboard = spawn("xinput", ["test-xi2", "--root"], {
     stdio: ["ignore", "pipe", "inherit"],
+  });
+  indicator = startIndicator(() => {
+    console.error("Аварийное завершение по кнопке индикатора");
+    keyboard.kill();
+    speech.shutdown();
+    indicator?.kill();
+    process.exit(0);
   });
 
   let currentEvent: "press" | "release" | null = null;
@@ -71,7 +100,13 @@ function main(): void {
   const setListening = (active: boolean): void => {
     if (listeningIsActive === active) return;
     listeningIsActive = active;
-    indicator.stdin?.write(active ? "show\n" : "hide\n");
+    if (active) {
+      speech.startListening();
+      indicator?.stdin?.write("recording\n");
+    } else {
+      indicator?.stdin?.write("processing\n");
+      speech.stopListening();
+    }
     console.log(active ? "Режим прослушивания включён" : "Режим прослушивания выключен");
   };
 
@@ -94,28 +129,20 @@ function main(): void {
     holdTimer = setTimeout(() => {
       holdTimer = null;
       if (activationKeysAreDown()) setListening(true);
-    }, HOLD_DELAY_MS);
+    }, VOICE_HOLD_DELAY_MS);
   };
 
-  const insertYes = (): void => {
-    const typer = spawn("xdotool", ["type", "--clearmodifiers", "--delay", "0", "--", "Да"], {
-      stdio: "inherit",
-    });
-    typer.once("error", (error) => {
-      console.error("Не удалось вставить «Да»:", error.message);
-    });
-    typer.once("exit", (code) => {
-      if (code !== 0) console.error(`Вставка «Да» завершилась с кодом ${code}`);
-    });
+  const submitPhrase = (text: string): void => {
+    const encodedText = Buffer.from(text, "utf8").toString("base64");
+    indicator?.stdin?.write(`submit:${encodedText}\n`);
   };
 
   const handlePress = (keycode: number): void => {
     if (pressedKeys.has(keycode)) return;
     pressedKeys.add(keycode);
 
-    if (keycode === keycodes.yes && controlIsDown()) {
-      insertYes();
-    }
+    const phrase = keycodes.phrases.get(keycode);
+    if (phrase && controlIsDown()) submitPhrase(phrase);
     beginActivation();
   };
 
@@ -143,28 +170,27 @@ function main(): void {
     }
   });
 
-  const shutdown = (): void => {
+  const shutdown = (exitCode = 0): void => {
     keyboard.kill();
-    indicator.stdin?.end();
-    indicator.kill();
+    indicator?.stdin?.end();
+    indicator?.kill();
+    speech.shutdown();
+    process.exit(exitCode);
   };
 
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", () => shutdown());
+  process.once("SIGTERM", () => shutdown());
   keyboard.once("error", (error) => {
     console.error("Не удалось запустить xinput:", error.message);
-    shutdown();
-    process.exitCode = 1;
+    shutdown(1);
   });
 
   console.log(
-    `Ctrl+Space (${HOLD_DELAY_MS} мс) — прослушивание; Ctrl+Y/Н — вставить «Да». Для выхода нажмите Ctrl+C.`,
+    `Ctrl+Space (${VOICE_HOLD_DELAY_MS} мс) — прослушивание; команды: ${PHRASE_SHORTCUTS.map(({ label, text }) => `Ctrl+${label} — «${text}»`).join("; ")}. Для выхода нажмите Ctrl+C.`,
   );
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
-}
+});
