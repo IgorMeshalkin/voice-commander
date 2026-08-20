@@ -39,6 +39,8 @@ services:
       - ${XAUTHORITY:-/run/user/1000/gdm/Xauthority}:/run/host-xauthority:ro
       - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse/native:/run/user/1000/pulse/native
       - ${HOME}/voice-commander/audio:/recordings
+      - ${HOME}/voice-commander/transcriptions:/transcriptions
+      - ${HOME}/voice-commander/reviews:/reviews
 
   transcription-worker:
     image: voice-commander:local
@@ -58,7 +60,18 @@ services:
         condition: service_healthy
     volumes:
       - ${HOME}/voice-commander/audio:/recordings:ro
-      - ${HOME}/voice-commander/transctibtions:/transcriptions
+      - ${HOME}/voice-commander/transcriptions:/transcriptions
+
+  admin:
+    build:
+      context: ./admin
+    image: voice-commander-admin:local
+    restart: unless-stopped
+    depends_on:
+      voice-commander:
+        condition: service_started
+    ports:
+      - "127.0.0.1:18082:80"
 
 volumes:
   postgres-data:

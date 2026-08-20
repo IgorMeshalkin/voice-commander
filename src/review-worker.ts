@@ -1,12 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
-import { access, chmod, rename, stat, unlink } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { DatabaseService, type AudioFileForReview } from "./database.js";
 
 const TRANSCRIPTIONS_DIR =
   process.env.VOICE_TRANSCRIPTIONS_DIR ??
-  join(process.env.HOME ?? ".", "voice-commander", "transctibtions");
+  join(process.env.HOME ?? ".", "voice-commander", "transcriptions");
+const REVIEWS_DIR =
+  process.env.VOICE_REVIEWS_DIR ?? join(process.env.HOME ?? ".", "voice-commander", "reviews");
 const CODEX_BIN = process.env.CODEX_BIN ?? "codex";
 const REVIEW_HOOK_SOCKET =
   process.env.REVIEW_HOOK_SOCKET ?? join(TRANSCRIPTIONS_DIR, ".review-worker.sock");
@@ -34,14 +36,27 @@ function reviewPaths(filename: string): {
   const stem = basename(filename, extname(filename));
   return {
     transcriptionPath: join(TRANSCRIPTIONS_DIR, `${stem}.txt`),
-    reviewPath: join(TRANSCRIPTIONS_DIR, `${stem}.review.md`),
-    temporaryReviewPath: join(TRANSCRIPTIONS_DIR, `.${stem}.review-${process.pid}.md`),
+    reviewPath: join(REVIEWS_DIR, `${stem}.md`),
+    temporaryReviewPath: join(REVIEWS_DIR, `.${stem}-${process.pid}.md`),
   };
 }
 
-async function runCodexReview(file: AudioFileForReview): Promise<void> {
+function extractAlias(markdown: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const reviewHeading = lines.findIndex((line) => line.trim() === "# Review");
+  if (reviewHeading < 0) throw new Error("В ревью отсутствует раздел # Review");
+  const firstLine = lines.slice(reviewHeading + 1).find((line) => line.trim().length > 0)?.trim();
+  const match = firstLine?.match(/^Alias:\s*(.+)$/);
+  const alias = match?.[1].trim();
+  if (!alias || alias.length > 160) {
+    throw new Error("Первая строка раздела Review не содержит корректный Alias");
+  }
+  return alias;
+}
+
+async function runCodexReview(file: AudioFileForReview): Promise<string> {
   const { transcriptionPath, reviewPath, temporaryReviewPath } = reviewPaths(file.filename);
-  if (await exists(reviewPath)) return;
+  if (await exists(reviewPath)) return extractAlias(await readFile(reviewPath, "utf8"));
   if (!(await exists(transcriptionPath))) {
     throw new Error(`Файл транскрипции не найден: ${transcriptionPath}`);
   }
@@ -50,7 +65,17 @@ async function runCodexReview(file: AudioFileForReview): Promise<void> {
   const prompt = [
     "Используй $audio-text-review.",
     `Обработай транскрипцию из файла: ${transcriptionPath}`,
-    "Верни только итоговый Markdown с разделами «Транскрипция» и «Review».",
+    "Верни только итоговый Markdown. Первая непустая строка после # Review обязана иметь вид Alias: <осмысленное название>.",
+    "После # Review добавь третий раздел верхнего уровня: # Предложения по созданию задач.",
+    "Извлеки только реальные действия, которые пользователь должен выполнить в связи с записью. Не придумывай задачи или сроки.",
+    "Для каждой найденной задачи используй строго такой формат:",
+    "### Задача",
+    "Название: <краткое название>",
+    "Описание: <что именно нужно сделать>",
+    "Ссылки: <ссылки через запятую или пусто>",
+    "Желательное время выполнения: <ISO 8601 с часовым поясом или пусто>",
+    "Жёсткий дедлайн: <ISO 8601 с часовым поясом или пусто>",
+    "Если ни одной обоснованной задачи нет, оставь раздел без подразделов ### Задача.",
   ].join("\n");
 
   console.log(`Ревью началось: ${file.filename}`);
@@ -93,15 +118,17 @@ async function runCodexReview(file: AudioFileForReview): Promise<void> {
     await unlink(temporaryReviewPath).catch(() => undefined);
     throw new Error("codex exec вернул пустое ревью");
   }
+  const alias = extractAlias(await readFile(temporaryReviewPath, "utf8"));
   await rename(temporaryReviewPath, reviewPath);
   console.log(`Ревью сохранено: ${reviewPath}`);
+  return alias;
 }
 
 async function processFile(database: DatabaseService, file: AudioFileForReview): Promise<void> {
   if (!(await database.markAudioFileReviewStarted(file.id))) return;
   try {
-    await runCodexReview(file);
-    await database.markAudioFileReviewed(file.id);
+    const alias = await runCodexReview(file);
+    await database.markAudioFileReviewed(file.id, alias);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     await database.markAudioFileReviewFailed(file.id, message);
@@ -112,6 +139,7 @@ async function processFile(database: DatabaseService, file: AudioFileForReview):
 async function main(): Promise<void> {
   const database = new DatabaseService();
   await database.initialize();
+  await mkdir(REVIEWS_DIR, { recursive: true });
   await unlink(REVIEW_HOOK_SOCKET).catch(() => undefined);
 
   const server = createServer((request, response) => {

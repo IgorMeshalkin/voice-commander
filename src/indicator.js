@@ -191,7 +191,7 @@ function handleCommand(command) {
     indicatorColor = [0.12, 0.72, 0.28];
     successIsVisible = true;
     statusLabel.set_markup(
-      '<span foreground="white" weight="bold" size="large">Ctrl+V</span>',
+      '<span foreground="white" weight="bold" size="large">Ctrl+C</span>',
     );
     drawingArea.queue_draw();
     window.show_all();
