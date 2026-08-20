@@ -32,12 +32,10 @@ sudo apt-get update && sudo apt-get install -y ffmpeg
 
 ## Интерфейс
 
-Положите скриншоты админ-панели в папку `docs/images`, используя следующие имена:
+<img width="1890" height="935" alt="image" src="https://github.com/user-attachments/assets/2b37ce30-db9b-4172-b67d-f472dbd57b78" />
+<img width="1890" height="935" alt="image" src="https://github.com/user-attachments/assets/b1434b17-d2ca-42db-b3ef-d11bcf994a82" />
+<img width="1890" height="935" alt="image" src="https://github.com/user-attachments/assets/327d0fa6-9455-4242-a848-2c74668f81d2" />
 
-- `admin-files.png` — страница аудиозаписей;
-- `admin-tasks.png` — страница задач.
-
-После добавления изображений удалите символы комментария вокруг строк ниже:
 
 <!-- ![Управление аудиозаписями](docs/images/admin-files.png) -->
 <!-- ![Управление задачами](docs/images/admin-tasks.png) -->
